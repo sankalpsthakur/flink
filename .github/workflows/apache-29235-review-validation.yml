@@ -67,19 +67,20 @@ jobs:
               }
 
           '''
-          import textwrap
-          replacement = '    ' + textwrap.dedent(replacement).lstrip()
           s = s[:a] + replacement + s[b:]
           p.write_text(s)
           PY
+          ./mvnw -B -pl flink-test-utils-parent/flink-test-utils-junit spotless:apply > /tmp/review-receipts/before-format.log 2>&1 || { tail -60 /tmp/review-receipts/before-format.log; exit 1; }
       - name: Prove current PR fails the new regressions
         shell: bash
         run: |
           set -uo pipefail
+          set +e
           ./mvnw -B -pl flink-test-utils-parent/flink-test-utils-junit -am test -Dtest=JobIDLoggingUtilTest -Dsurefire.failIfNoSpecifiedTests=false > /tmp/review-receipts/before.log 2>&1
           result=$?
+          set -e
           tail -60 /tmp/review-receipts/before.log
-          test "$result" -ne 0 || exit 1
+          test "$result" -ne 0
           python3 - <<'PY'
           from pathlib import Path
           import xml.etree.ElementTree as E
@@ -153,7 +154,7 @@ jobs:
           s = s.replace('    private static JobID runJob(ClusterClient<?> clusterClient, Configuration jobConfig)', '    static JobID runJob(ClusterClient<?> clusterClient, Configuration jobConfig)')
           p.write_text(s)
           PY
-          ./mvnw -B -pl flink-tests,flink-test-utils-parent/flink-test-utils-junit spotless:apply
+          ./mvnw -B -pl flink-tests,flink-test-utils-parent/flink-test-utils-junit spotless:apply > /tmp/review-receipts/after-format.log 2>&1 || { tail -60 /tmp/review-receipts/after-format.log; exit 1; }
           git diff --check
           git add flink-tests/src/test/java/org/apache/flink/test/misc/JobIDLoggingITCase.java flink-tests/src/test/java/org/apache/flink/test/misc/EnrichedMdcLoggingITCase.java flink-test-utils-parent/flink-test-utils-junit/src/main/java/org/apache/flink/util/JobIDLoggingUtil.java flink-test-utils-parent/flink-test-utils-junit/src/test/java/org/apache/flink/util/JobIDLoggingUtilTest.java
           git diff --cached --binary > /tmp/review-receipts/fix.patch
@@ -162,31 +163,33 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./mvnw -B -pl flink-test-utils-parent/flink-test-utils-junit -am test -Dtest=JobIDLoggingUtilTest -Dsurefire.failIfNoSpecifiedTests=false > /tmp/review-receipts/after-unit.log 2>&1
+          ./mvnw -B -pl flink-test-utils-parent/flink-test-utils-junit -am test -Dtest=JobIDLoggingUtilTest -Dsurefire.failIfNoSpecifiedTests=false > /tmp/review-receipts/after-unit.log 2>&1 || { tail -60 /tmp/review-receipts/after-unit.log; exit 1; }
           tail -40 /tmp/review-receipts/after-unit.log
           cp flink-test-utils-parent/flink-test-utils-junit/target/surefire-reports/TEST-org.apache.flink.util.JobIDLoggingUtilTest.xml /tmp/review-receipts/after-unit.xml
       - name: Build integration-test dependencies
         shell: bash
         run: |
           set -euo pipefail
-          ./mvnw -B -pl flink-tests -am install -DskipTests -Dfast -Pskip-webui-build -T2 > /tmp/review-receipts/dependencies.log 2>&1
+          ./mvnw -B -pl flink-tests -am install -DskipTests -Dfast -Pskip-webui-build -T2 > /tmp/review-receipts/dependencies.log 2>&1 || { tail -80 /tmp/review-receipts/dependencies.log; exit 1; }
           tail -60 /tmp/review-receipts/dependencies.log
       - name: Run both logging integration classes and code quality
         shell: bash
         run: |
           set -euo pipefail
           for n in 1 2 3; do
-            ./mvnw -B -pl flink-tests test -Dtest=JobIDLoggingITCase,EnrichedMdcLoggingITCase > /tmp/review-receipts/integration-$n.log 2>&1
+            ./mvnw -B -pl flink-tests test -Dtest=JobIDLoggingITCase,EnrichedMdcLoggingITCase > /tmp/review-receipts/integration-$n.log 2>&1 || { tail -80 /tmp/review-receipts/integration-$n.log; exit 1; }
             mkdir -p /tmp/review-receipts/integration-$n
-            cp flink-tests/target/surefire-reports/TEST-org.apache.flink.test.misc.*MdcLoggingITCase.xml /tmp/review-receipts/integration-$n/
+            cp flink-tests/target/surefire-reports/TEST-org.apache.flink.test.misc.EnrichedMdcLoggingITCase.xml /tmp/review-receipts/integration-$n/
             cp flink-tests/target/surefire-reports/TEST-org.apache.flink.test.misc.JobIDLoggingITCase.xml /tmp/review-receipts/integration-$n/
           done
-          ./mvnw -B -pl flink-tests,flink-test-utils-parent/flink-test-utils-junit spotless:check checkstyle:check > /tmp/review-receipts/quality.log 2>&1
+          ./mvnw -B -pl flink-tests,flink-test-utils-parent/flink-test-utils-junit spotless:check checkstyle:check > /tmp/review-receipts/quality.log 2>&1 || { tail -80 /tmp/review-receipts/quality.log; exit 1; }
           git diff --check
           python3 - <<'PY'
           from pathlib import Path
           import xml.etree.ElementTree as E
-          for p in [Path('/tmp/review-receipts/after-unit.xml'), *Path('/tmp/review-receipts').glob('integration-*/*.xml')]:
+          results = [Path('/tmp/review-receipts/after-unit.xml'), *Path('/tmp/review-receipts').glob('integration-*/*.xml')]
+          assert len(results) == 7
+          for p in results:
               root = E.parse(p).getroot()
               print(p, root.attrib)
               assert int(root.get('tests')) > 0
@@ -224,7 +227,7 @@ jobs:
           git diff --cached --check
           ! git diff --cached --name-only | grep '^.github/'
           git config user.name 'Sankalp Thakur'
-          git config user.email 'sankalpsthakur@users.noreply.github.com'
+          git config user.email '31366524+sankalpsthakur@users.noreply.github.com'
           git commit -m '[FLINK-40664][tests] Isolate MDC logging clusters and preserve assertion precedence' -m 'Generated-by: ChatGPT GPT-6 Astra Pro'
           git push origin HEAD:refs/heads/review/flink-29235-tested-20260918
           git rev-parse HEAD >> "$GITHUB_STEP_SUMMARY"
