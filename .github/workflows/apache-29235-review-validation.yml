@@ -1,0 +1,230 @@
+name: Validate FLINK-40664 review fixes
+on:
+  push:
+    branches: [validation/apache-29235-review-20260918]
+permissions:
+  contents: read
+jobs:
+  validate:
+    if: github.repository == 'sankalpsthakur/flink'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 244995ba5bc6b46dd4439921275ddb428308de72
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Add precedence and all-four-message regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/review-receipts
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('flink-test-utils-parent/flink-test-utils-junit/src/test/java/org/apache/flink/util/JobIDLoggingUtilTest.java')
+          s = p.read_text()
+          s = s.replace('import org.junit.jupiter.api.extension.RegisterExtension;','import org.junit.jupiter.api.extension.RegisterExtension;\nimport org.junit.jupiter.params.ParameterizedTest;\nimport org.junit.jupiter.params.provider.ValueSource;')
+          a = s.index('    @Test\n    void ignorePatternsSkipEventsWithADifferentKeyValue()')
+          b = s.index('    @Test', a + 10)
+          replacement = '''    @ParameterizedTest
+              @ValueSource(
+                      strings = {
+                          "Freeing inactive slots for job job-b.",
+                          "Free slot with allocation id allocation-b.",
+                          "Close JobManager connection for job job-b.",
+                          "Releasing job resources for job job-b."
+                      })
+              void ignoredPatternsDoNotHideWrongJobIds(String message) {
+                  logWithMdc("job-a", "Received task test-task.");
+                  logWithMdc("job-b", message);
+                  assertThatThrownBy(
+                                  () ->
+                                          JobIDLoggingUtil.assertKeyPresent(
+                                                  KEY,
+                                                  "job-a",
+                                                  logging,
+                                                  Collections.singletonList("Received task .*"),
+                                                  "Free.*|Close.*|Releasing.*"))
+                          .isInstanceOf(AssertionError.class)
+                          .hasMessageContaining("events with a wrong value");
+              }
+
+              @Test
+              void expectedEventsStillCountWhenAnIgnorePatternMatches() {
+                  logWithMdc("job-a", "Received task test-task.");
+                  JobIDLoggingUtil.assertKeyPresent(
+                          KEY,
+                          "job-a",
+                          logging,
+                          Collections.singletonList("Received task .*"),
+                          "Received task .*");
+              }
+
+          '''
+          import textwrap
+          replacement = '    ' + textwrap.dedent(replacement).lstrip()
+          s = s[:a] + replacement + s[b:]
+          p.write_text(s)
+          PY
+      - name: Prove current PR fails the new regressions
+        shell: bash
+        run: |
+          set -uo pipefail
+          ./mvnw -B -pl flink-test-utils-parent/flink-test-utils-junit -am test -Dtest=JobIDLoggingUtilTest -Dsurefire.failIfNoSpecifiedTests=false > /tmp/review-receipts/before.log 2>&1
+          result=$?
+          tail -60 /tmp/review-receipts/before.log
+          test "$result" -ne 0 || exit 1
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as E
+          p = Path('flink-test-utils-parent/flink-test-utils-junit/target/surefire-reports/TEST-org.apache.flink.util.JobIDLoggingUtilTest.xml')
+          root = E.parse(p).getroot()
+          print(root.attrib)
+          assert int(root.get('tests')) == 7
+          assert int(root.get('failures')) == 5
+          assert int(root.get('errors')) == 0
+          assert int(root.get('skipped')) == 0
+          Path('/tmp/review-receipts/before.xml').write_bytes(p.read_bytes())
+          PY
+      - name: Restore helper semantics and isolate enriched logging cluster
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show 244995ba5bc6b46dd4439921275ddb428308de72^:flink-test-utils-parent/flink-test-utils-junit/src/main/java/org/apache/flink/util/JobIDLoggingUtil.java > flink-test-utils-parent/flink-test-utils-junit/src/main/java/org/apache/flink/util/JobIDLoggingUtil.java
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('flink-tests/src/test/java/org/apache/flink/test/misc/JobIDLoggingITCase.java')
+          s = p.read_text()
+          start = s.index('    @Test\n    void testEnrichedMdcLogging(')
+          end = s.index('    private static JobID runJob(', start)
+          enriched = s[start:end]
+          license = s[:s.index('package ')]
+          cluster_start = s.index('    @RegisterExtension\n    public static MiniClusterExtension miniClusterResource')
+          cluster_end = s.index('    private static Configuration getConfiguration()', cluster_start)
+          cluster = s[cluster_start:cluster_end]
+          imports = '''package org.apache.flink.test.misc;
+
+          import org.apache.flink.api.common.JobID;
+          import org.apache.flink.client.program.ClusterClient;
+          import org.apache.flink.configuration.Configuration;
+          import org.apache.flink.configuration.MdcOptions;
+          import org.apache.flink.runtime.jobmaster.JobMaster;
+          import org.apache.flink.runtime.taskexecutor.TaskExecutor;
+          import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
+          import org.apache.flink.test.junit5.InjectClusterClient;
+          import org.apache.flink.test.junit5.MiniClusterExtension;
+          import org.apache.flink.testutils.logging.LoggerAuditingExtension;
+
+          import org.junit.jupiter.api.Test;
+          import org.junit.jupiter.api.extension.RegisterExtension;
+
+          import java.util.Map;
+
+          import static java.util.Arrays.asList;
+          import static org.apache.flink.test.misc.JobIDLoggingITCase.getConfiguration;
+          import static org.apache.flink.test.misc.JobIDLoggingITCase.runJob;
+          import static org.apache.flink.util.JobIDLoggingUtil.assertKeyPresent;
+          import static org.slf4j.event.Level.DEBUG;
+
+          class EnrichedMdcLoggingITCase {
+              @RegisterExtension
+              public final LoggerAuditingExtension jobMasterLogging =
+                      new LoggerAuditingExtension(JobMaster.class, DEBUG);
+
+              @RegisterExtension
+              public final LoggerAuditingExtension taskExecutorLogging =
+                      new LoggerAuditingExtension(TaskExecutor.class, DEBUG);
+
+          '''
+          import textwrap
+          new = license + textwrap.dedent(imports) + cluster + enriched + '}\n'
+          p.with_name('EnrichedMdcLoggingITCase.java').write_text(new)
+          s = s[:start] + s[end:]
+          s = s.replace('import org.apache.flink.configuration.MdcOptions;\n', '').replace('import java.util.Map;\n', '')
+          assert s.count('                ".*leadership.*",\n                "Freeing inactive slots.*");') == 1
+          s = s.replace('                ".*leadership.*",\n                "Freeing inactive slots.*");', '                ".*leadership.*");')
+          s = s.replace('    private static Configuration getConfiguration()', '    static Configuration getConfiguration()')
+          s = s.replace('    private static JobID runJob(ClusterClient<?> clusterClient, Configuration jobConfig)', '    static JobID runJob(ClusterClient<?> clusterClient, Configuration jobConfig)')
+          p.write_text(s)
+          PY
+          ./mvnw -B -pl flink-tests,flink-test-utils-parent/flink-test-utils-junit spotless:apply
+          git diff --check
+          git add flink-tests/src/test/java/org/apache/flink/test/misc/JobIDLoggingITCase.java flink-tests/src/test/java/org/apache/flink/test/misc/EnrichedMdcLoggingITCase.java flink-test-utils-parent/flink-test-utils-junit/src/main/java/org/apache/flink/util/JobIDLoggingUtil.java flink-test-utils-parent/flink-test-utils-junit/src/test/java/org/apache/flink/util/JobIDLoggingUtilTest.java
+          git diff --cached --binary > /tmp/review-receipts/fix.patch
+          git diff --cached --stat
+      - name: Verify helper regressions after restoration
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./mvnw -B -pl flink-test-utils-parent/flink-test-utils-junit -am test -Dtest=JobIDLoggingUtilTest -Dsurefire.failIfNoSpecifiedTests=false > /tmp/review-receipts/after-unit.log 2>&1
+          tail -40 /tmp/review-receipts/after-unit.log
+          cp flink-test-utils-parent/flink-test-utils-junit/target/surefire-reports/TEST-org.apache.flink.util.JobIDLoggingUtilTest.xml /tmp/review-receipts/after-unit.xml
+      - name: Build integration-test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./mvnw -B -pl flink-tests -am install -DskipTests -Dfast -Pskip-webui-build -T2 > /tmp/review-receipts/dependencies.log 2>&1
+          tail -60 /tmp/review-receipts/dependencies.log
+      - name: Run both logging integration classes and code quality
+        shell: bash
+        run: |
+          set -euo pipefail
+          for n in 1 2 3; do
+            ./mvnw -B -pl flink-tests test -Dtest=JobIDLoggingITCase,EnrichedMdcLoggingITCase > /tmp/review-receipts/integration-$n.log 2>&1
+            mkdir -p /tmp/review-receipts/integration-$n
+            cp flink-tests/target/surefire-reports/TEST-org.apache.flink.test.misc.*MdcLoggingITCase.xml /tmp/review-receipts/integration-$n/
+            cp flink-tests/target/surefire-reports/TEST-org.apache.flink.test.misc.JobIDLoggingITCase.xml /tmp/review-receipts/integration-$n/
+          done
+          ./mvnw -B -pl flink-tests,flink-test-utils-parent/flink-test-utils-junit spotless:check checkstyle:check > /tmp/review-receipts/quality.log 2>&1
+          git diff --check
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as E
+          for p in [Path('/tmp/review-receipts/after-unit.xml'), *Path('/tmp/review-receipts').glob('integration-*/*.xml')]:
+              root = E.parse(p).getroot()
+              print(p, root.attrib)
+              assert int(root.get('tests')) > 0
+              assert all(int(root.get(k, '0')) == 0 for k in ('failures', 'errors', 'skipped'))
+          PY
+          git write-tree > /tmp/review-receipts/tree.txt
+          git rev-parse HEAD > /tmp/review-receipts/parent.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: flink-29235-review-receipts
+          path: /tmp/review-receipts
+          retention-days: 14
+  candidate:
+    needs: validate
+    if: github.repository == 'sankalpsthakur/flink'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 244995ba5bc6b46dd4439921275ddb428308de72
+      - uses: actions/download-artifact@v4
+        with:
+          name: flink-29235-review-receipts
+          path: /tmp/review-receipts
+      - name: Publish only tested source to a new candidate branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$(cat /tmp/review-receipts/parent.txt)"
+          git apply --index /tmp/review-receipts/fix.patch
+          test "$(git write-tree)" = "$(cat /tmp/review-receipts/tree.txt)"
+          git diff --cached --check
+          ! git diff --cached --name-only | grep '^.github/'
+          git config user.name 'Sankalp Thakur'
+          git config user.email 'sankalpsthakur@users.noreply.github.com'
+          git commit -m '[FLINK-40664][tests] Isolate MDC logging clusters and preserve assertion precedence' -m 'Generated-by: ChatGPT GPT-6 Astra Pro'
+          git push origin HEAD:refs/heads/review/flink-29235-tested-20260918
+          git rev-parse HEAD >> "$GITHUB_STEP_SUMMARY"
