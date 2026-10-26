@@ -38,6 +38,12 @@ class SplitAggregateRuleTest extends TableTestBase {
   }
 
   @Test
+  def testAvgOnIntWithCountDistinct(): Unit = {
+    // AVG(INT) must project CAST(b AS BIGINT) before SUM0 so the partial sum cannot overflow.
+    util.verifyRelPlan("SELECT COUNT(DISTINCT c), AVG(b) FROM MyTable")
+  }
+
+  @Test
   def testSingleMinAgg(): Unit = {
     // does not contain distinct agg
     util.verifyRelPlan("SELECT MIN(c) FROM MyTable")

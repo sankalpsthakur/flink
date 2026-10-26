@@ -41,8 +41,8 @@ LogicalAggregate(group=[{0}], EXPR$1=[COUNT(DISTINCT $1) FILTER $2], EXPR$2=[SUM
       <![CDATA[
 FlinkLogicalCalc(select=[a, $f1, $f2, $f3, CAST(IF(=($f5, 0), null:INTEGER, /($f4, $f5)) AS INTEGER) AS $f4, $f6])
 +- FlinkLogicalAggregate(group=[{0}], agg#0=[$SUM0($2)], agg#1=[SUM($3)], agg#2=[$SUM0($4)], agg#3=[$SUM0($5)], agg#4=[$SUM0($6)], agg#5=[SUM($7)])
-   +- FlinkLogicalAggregate(group=[{0, 4}], agg#0=[COUNT(DISTINCT $1) FILTER $2], agg#1=[SUM($1) FILTER $3], agg#2=[COUNT($1)], agg#3=[$SUM0($1)], agg#4=[COUNT($1)], agg#5=[SUM($1)])
-      +- FlinkLogicalCalc(select=[a, b, IS TRUE(<>(b, 2)) AS $f2, IS TRUE(<>(b, 5)) AS $f3, MOD(HASH_CODE(b), 1024) AS $f4])
+   +- FlinkLogicalAggregate(group=[{0, 4}], agg#0=[COUNT(DISTINCT $1) FILTER $2], agg#1=[SUM($1) FILTER $3], agg#2=[COUNT($1)], agg#3=[$SUM0($5)], agg#4=[COUNT($5)], agg#5=[SUM($1)])
+      +- FlinkLogicalCalc(select=[a, b, IS TRUE(<>(b, 2)) AS $f2, IS TRUE(<>(b, 5)) AS $f3, MOD(HASH_CODE(b), 1024) AS $f4, CAST(b AS BIGINT) AS b0])
          +- FlinkLogicalTableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
 ]]>
     </Resource>
@@ -117,6 +117,27 @@ FlinkLogicalJoin(condition=[=($1, $4)], joinType=[inner])
 :                 +- FlinkLogicalCalc(select=[a, b, MOD(HASH_CODE(b), 1024) AS $f2])
 :                    +- FlinkLogicalTableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
 +- FlinkLogicalTableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testAvgOnIntWithCountDistinct">
+    <Resource name="sql">
+      <![CDATA[SELECT COUNT(DISTINCT c), AVG(b) FROM MyTable]]>
+    </Resource>
+    <Resource name="ast">
+      <![CDATA[
+LogicalAggregate(group=[{}], EXPR$0=[COUNT(DISTINCT $0)], EXPR$1=[AVG($1)])
++- LogicalProject(c=[$2], b=[$1])
+   +- LogicalTableScan(table=[[default_catalog, default_database, MyTable]])
+]]>
+    </Resource>
+    <Resource name="optimized rel plan">
+      <![CDATA[
+FlinkLogicalCalc(select=[$f0, CAST(IF(=($f2, 0), null:INTEGER, /($f1, $f2)) AS INTEGER) AS $f1])
++- FlinkLogicalAggregate(group=[{}], agg#0=[$SUM0($1)], agg#1=[$SUM0($2)], agg#2=[$SUM0($3)])
+   +- FlinkLogicalAggregate(group=[{2}], agg#0=[COUNT(DISTINCT $0)], agg#1=[$SUM0($3)], agg#2=[COUNT($3)])
+      +- FlinkLogicalCalc(select=[c, b, MOD(HASH_CODE(c), 1024) AS $f2, CAST(b AS BIGINT) AS b0])
+         +- FlinkLogicalTableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
 ]]>
     </Resource>
   </TestCase>
@@ -219,8 +240,8 @@ LogicalAggregate(group=[{0}], EXPR$1=[COUNT(DISTINCT $1)], EXPR$2=[COUNT(DISTINC
       <![CDATA[
 FlinkLogicalCalc(select=[a, $f1, $f2, $f3, CAST(IF(=($f5, 0), null:INTEGER, /($f4, $f5)) AS INTEGER) AS $f4])
 +- FlinkLogicalAggregate(group=[{0}], agg#0=[$SUM0($2)], agg#1=[$SUM0($3)], agg#2=[SUM($4)], agg#3=[$SUM0($5)], agg#4=[$SUM0($6)])
-   +- FlinkLogicalAggregate(group=[{0, 3}], agg#0=[COUNT(DISTINCT $1)], agg#1=[COUNT(DISTINCT $1) FILTER $2], agg#2=[SUM($1)], agg#3=[$SUM0($1)], agg#4=[COUNT($1)])
-      +- FlinkLogicalCalc(select=[a, b, IS TRUE(<>(b, 5)) AS $f2, MOD(HASH_CODE(b), 1024) AS $f3])
+   +- FlinkLogicalAggregate(group=[{0, 3}], agg#0=[COUNT(DISTINCT $1)], agg#1=[COUNT(DISTINCT $1) FILTER $2], agg#2=[SUM($1)], agg#3=[$SUM0($4)], agg#4=[COUNT($4)])
+      +- FlinkLogicalCalc(select=[a, b, IS TRUE(<>(b, 5)) AS $f2, MOD(HASH_CODE(b), 1024) AS $f3, CAST(b AS BIGINT) AS b0])
          +- FlinkLogicalTableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
 ]]>
     </Resource>
@@ -287,8 +308,8 @@ LogicalAggregate(group=[{0}], EXPR$1=[COUNT(DISTINCT $1)], EXPR$2=[SUM($1)], EXP
       <![CDATA[
 FlinkLogicalCalc(select=[a, $f1, $f2, CAST(IF(=($f4, 0), null:INTEGER, /($f3, $f4)) AS INTEGER) AS $f3])
 +- FlinkLogicalAggregate(group=[{0}], agg#0=[$SUM0($2)], agg#1=[SUM($3)], agg#2=[$SUM0($4)], agg#3=[$SUM0($5)])
-   +- FlinkLogicalAggregate(group=[{0, 2}], agg#0=[COUNT(DISTINCT $1)], agg#1=[SUM($1)], agg#2=[$SUM0($1)], agg#3=[COUNT($1)])
-      +- FlinkLogicalCalc(select=[a, b, MOD(HASH_CODE(b), 1024) AS $f2])
+   +- FlinkLogicalAggregate(group=[{0, 2}], agg#0=[COUNT(DISTINCT $1)], agg#1=[SUM($1)], agg#2=[$SUM0($3)], agg#3=[COUNT($3)])
+      +- FlinkLogicalCalc(select=[a, b, MOD(HASH_CODE(b), 1024) AS $f2, CAST(b AS BIGINT) AS b0])
          +- FlinkLogicalTableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
 ]]>
     </Resource>
