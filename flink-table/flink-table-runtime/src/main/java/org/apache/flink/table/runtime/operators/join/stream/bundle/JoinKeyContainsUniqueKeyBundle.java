@@ -66,11 +66,21 @@ public class JoinKeyContainsUniqueKeyBundle extends BufferBundle<List<RowData>> 
     // |    -D/-U                 |        -D/-U               |    Only keep the last      |
     // |                          |                            |       (-D/-U) record       |
     // |--------------------------|----------------------------|----------------------------|
-    // |    +I/+U                 |        -U/-D               |       Clear both           |
+    // |    +I/+U with a          |        -U/-D               |       Clear both;          |
+    // |    preceding retract     |                            |       preceding retract    |
+    // |                          |                            |       remains              |
+    // |--------------------------|----------------------------|----------------------------|
+    // |    lone +I/+U            |        -U/-D               |       Keep both            |
     // +--------------------------+----------------------------+----------------------------+
 
     /**
      * Folds the records in reverse order based on a specific rule. The rule is as above.
+     *
+     * <p>A lone accumulate followed by a retract is not folded. That accumulate may have replaced a
+     * row stored in a previous bundle (a bare {@link RowKind#UPDATE_AFTER}, or a repeated {@link
+     * RowKind#INSERT} for the same unique key). Dropping both records would leave that stored row
+     * without a retraction. Clearing the pair remains correct when a preceding retract is already
+     * in the bundle, because that retract is the retraction of the stored row.
      *
      * <p>In this context, the symbols refer to the following RowKind values: "+I" refers to {@link
      * RowKind#INSERT}. "+U" refers to {@link RowKind#UPDATE_AFTER}. "-U" refers to {@link
@@ -85,6 +95,10 @@ public class JoinKeyContainsUniqueKeyBundle extends BufferBundle<List<RowData>> 
         if (lastElement.isPresent()) {
             RowData last = lastElement.get();
             if (RowDataUtil.isAccumulateMsg(last)) {
+                // A lone +I/+U may replace a row stored in a previous bundle. Keep the retract.
+                if (RowDataUtil.isRetractMsg(record) && list.size() == 1) {
+                    return false;
+                }
                 if (RowDataUtil.isRetractMsg(record)) {
                     shouldFoldRecord = true;
                 }

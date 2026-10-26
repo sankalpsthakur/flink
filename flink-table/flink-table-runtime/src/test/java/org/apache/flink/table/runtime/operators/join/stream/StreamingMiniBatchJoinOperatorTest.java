@@ -1254,6 +1254,20 @@ final class StreamingMiniBatchJoinOperatorTest extends StreamingJoinOperatorTest
 
     @Tag("miniBatchSize=2")
     @Test
+    void testLeftJoinJoinKeyContainsUniqueKeyUpdateAfterThenDelete() throws Exception {
+        // JoinKeyContainsUniqueKeyBundle must not fold +U/-D into nothing after storing the row
+        testLeftJoinUpdateAfterThenDeleteRetractsStoredRow();
+    }
+
+    @Tag("miniBatchSize=2")
+    @Test
+    void testLeftJoinHasUniqueKeyUpdateAfterThenDelete() throws Exception {
+        // InputSideHasUniqueKeyBundle has the same fold as JoinKeyContainsUniqueKeyBundle
+        testLeftJoinUpdateAfterThenDeleteRetractsStoredRow();
+    }
+
+    @Tag("miniBatchSize=2")
+    @Test
     void testLeftJoinJoinKeyContainsUniqueKeyWithoutAcc() throws Exception {
         // this case would create buffer of JoinKeyContainsUniqueKey
         testLeftJoinWithoutAcc();
@@ -1722,6 +1736,60 @@ final class StreamingMiniBatchJoinOperatorTest extends StreamingJoinOperatorTest
                         "Ord#2",
                         "LineOrd#2",
                         "AIR"));
+    }
+
+    /**
+     * Bundle 1 stores two left rows. Bundle 2 receives UPDATE_AFTER then DELETE for the first key.
+     * The previously stored row must be retracted; folding the pair into nothing would leave it in
+     * state and in the sink.
+     */
+    private void testLeftJoinUpdateAfterThenDeleteRetractsStoredRow() throws Exception {
+        testHarness.processElement1(
+                insertRecord("Ord#1", "LineOrd#1", "3 Bellevue Drive, Pottstown, PA 19464"));
+        testHarness.processElement1(
+                insertRecord("Ord#2", "LineOrd#2", "4 Bellevue Drive, Pottstown, PB 19464"));
+        assertor.shouldEmitAll(
+                testHarness,
+                rowOfKind(
+                        RowKind.INSERT,
+                        "Ord#1",
+                        "LineOrd#1",
+                        "3 Bellevue Drive, Pottstown, PA 19464",
+                        null,
+                        null,
+                        null),
+                rowOfKind(
+                        RowKind.INSERT,
+                        "Ord#2",
+                        "LineOrd#2",
+                        "4 Bellevue Drive, Pottstown, PB 19464",
+                        null,
+                        null,
+                        null));
+        testHarness.getOutput().clear();
+
+        testHarness.processElement1(
+                updateAfterRecord("Ord#1", "LineOrd#1", "5 Bellevue Drive, Pottstown, PC 19464"));
+        testHarness.processElement1(
+                deleteRecord("Ord#1", "LineOrd#1", "5 Bellevue Drive, Pottstown, PC 19464"));
+        assertor.shouldEmit(
+                testHarness,
+                rowOfKind(
+                        RowKind.INSERT,
+                        "Ord#1",
+                        "LineOrd#1",
+                        "5 Bellevue Drive, Pottstown, PC 19464",
+                        null,
+                        null,
+                        null),
+                rowOfKind(
+                        RowKind.DELETE,
+                        "Ord#1",
+                        "LineOrd#1",
+                        "5 Bellevue Drive, Pottstown, PC 19464",
+                        null,
+                        null,
+                        null));
     }
 
     private void testLeftJoinWithoutRetract() throws Exception {

@@ -142,6 +142,51 @@ class BufferBundleTest {
         testPatternCombinationInternal();
     }
 
+    /**
+     * After a previous bundle stored the row, a bare UPDATE_AFTER followed by DELETE must keep both
+     * records so the stored row is retracted.
+     */
+    @ParameterizedTest(name = "joinKeyContainsUniqueKey: {0}")
+    @ValueSource(booleans = {true, false})
+    void testUpdateAfterThenDeleteAfterStoredRow(boolean joinKeyContainsUniqueKey)
+            throws Exception {
+        buffer =
+                joinKeyContainsUniqueKey
+                        ? new JoinKeyContainsUniqueKeyBundle()
+                        : new InputSideHasUniqueKeyBundle();
+        testUpdateAfterThenDeleteAfterStoredRowInternal();
+    }
+
+    /**
+     * A repeated INSERT for a unique key already stored in a previous bundle followed by DELETE
+     * must also keep both records.
+     */
+    @ParameterizedTest(name = "joinKeyContainsUniqueKey: {0}")
+    @ValueSource(booleans = {true, false})
+    void testRepeatedInsertThenDeleteAfterStoredRow(boolean joinKeyContainsUniqueKey)
+            throws Exception {
+        buffer =
+                joinKeyContainsUniqueKey
+                        ? new JoinKeyContainsUniqueKeyBundle()
+                        : new InputSideHasUniqueKeyBundle();
+        testRepeatedInsertThenDeleteAfterStoredRowInternal();
+    }
+
+    /**
+     * When this bundle already holds the stored row's UPDATE_BEFORE, folding +U/-D into nothing is
+     * still correct: the UPDATE_BEFORE remains as the retraction.
+     */
+    @ParameterizedTest(name = "joinKeyContainsUniqueKey: {0}")
+    @ValueSource(booleans = {true, false})
+    void testAccumulateRetractFoldWhenUpdateBeforePresent(boolean joinKeyContainsUniqueKey)
+            throws Exception {
+        buffer =
+                joinKeyContainsUniqueKey
+                        ? new JoinKeyContainsUniqueKeyBundle()
+                        : new InputSideHasUniqueKeyBundle();
+        testAccumulateRetractFoldWhenUpdateBeforePresentInternal();
+    }
+
     @Test
     void testInputSideHasNoUniqueKey() throws Exception {
         // +--------------------------+----------------------------+----------------------------+
@@ -298,7 +343,7 @@ class BufferBundleTest {
         // +--------------------------+----------------------------+----------------------------+
         // |   Before the last        |       Last record          |          Result            |
         // |--------------------------|----------------------------|----------------------------|
-        // |    +I/+U                 |        -U/-D               |        Clear both          |
+        // |    lone +I/+U            |        -U/-D               |        Keep both           |
         // +--------------------------+----------------------------+----------------------------+
         List<RowData> records =
                 Stream.of(
@@ -337,8 +382,8 @@ class BufferBundleTest {
                         .map(StreamRecord::getValue)
                         .collect(Collectors.toList());
         addRecordsToBuffer(records);
-        assertRecords(Collections.emptyList(), records.size());
-        assertJoinKeys(Collections.emptyList());
+        assertRecords(records, records.size());
+        assertJoinKeys(records);
     }
 
     private void testRetractWithAccumulatePatternInternal() throws Exception {
@@ -477,7 +522,7 @@ class BufferBundleTest {
         // |         +I/+U            |        +U/+I               |    Only keep the last      |
         // |                          |                            |       (+U/+I) record       |
         // |--------------------------|----------------------------|----------------------------|
-        // |         +I/+U            |        -U/-D               |       Clear both           |
+        // |         lone +I/+U       |        -U/-D               |       Keep both            |
         // |--------------------------|----------------------------|----------------------------|
         // |         -U/-D            |        -U/-D               |        keep  last          |
         // +--------------------------+----------------------------+----------------------------+
@@ -655,11 +700,140 @@ class BufferBundleTest {
                                 insertRecord(
                                         "Ord#4",
                                         "LineOrd#4",
+                                        "10 Bellevue Drive, Pottstown, PJyy 19464"),
+                                insertRecord(
+                                        "Ord#6",
+                                        "LineOrd#6",
+                                        "3 Bellevue Drive, Pottstown, PA 19464"),
+                                updateBeforeRecord(
+                                        "Ord#6",
+                                        "LineOrd#6",
+                                        "7 Bellevue Drive, Pottstown, PL 19464"),
+                                insertRecord(
+                                        "Ord#7",
+                                        "LineOrd#7",
+                                        "4 Bellevue Drive, Pottstown, PB 19464"),
+                                deleteRecord(
+                                        "Ord#7",
+                                        "LineOrd#7",
+                                        "9 Bellevue Drive, Pottstown, PJyy 19464"),
+                                updateAfterRecord(
+                                        "Ord#8",
+                                        "LineOrd#8",
+                                        "5 Bellevue Drive, Pottstown, PJ 19464"),
+                                updateBeforeRecord(
+                                        "Ord#8",
+                                        "LineOrd#8",
+                                        "8 Bellevue Drive, Pottstown, PCxx 19464"),
+                                updateAfterRecord(
+                                        "Ord#9",
+                                        "LineOrd#9",
+                                        "6 Bellevue Drive, Pottstown, PK 19464"),
+                                deleteRecord(
+                                        "Ord#9",
+                                        "LineOrd#9",
                                         "10 Bellevue Drive, Pottstown, PJyy 19464"))
                         .map(StreamRecord::getValue)
                         .collect(Collectors.toList());
         assertRecords(result, records.size());
         assertJoinKeys(result);
+    }
+
+    private void testUpdateAfterThenDeleteAfterStoredRowInternal() throws Exception {
+        List<RowData> stored =
+                Stream.of(
+                                insertRecord(
+                                        "Ord#1",
+                                        "LineOrd#1",
+                                        "3 Bellevue Drive, Pottstown, PA 19464"),
+                                insertRecord(
+                                        "Ord#2",
+                                        "LineOrd#2",
+                                        "4 Bellevue Drive, Pottstown, PB 19464"))
+                        .map(StreamRecord::getValue)
+                        .collect(Collectors.toList());
+        addRecordsToBuffer(stored);
+        assertRecords(stored, stored.size());
+        buffer.clear();
+
+        List<RowData> updateThenDelete =
+                Stream.of(
+                                updateAfterRecord(
+                                        "Ord#1",
+                                        "LineOrd#1",
+                                        "5 Bellevue Drive, Pottstown, PC 19464"),
+                                deleteRecord(
+                                        "Ord#1",
+                                        "LineOrd#1",
+                                        "5 Bellevue Drive, Pottstown, PC 19464"))
+                        .map(StreamRecord::getValue)
+                        .collect(Collectors.toList());
+        addRecordsToBuffer(updateThenDelete);
+        assertRecords(updateThenDelete, updateThenDelete.size());
+        assertJoinKeys(updateThenDelete);
+    }
+
+    private void testRepeatedInsertThenDeleteAfterStoredRowInternal() throws Exception {
+        List<RowData> stored =
+                Stream.of(
+                                insertRecord(
+                                        "Ord#1",
+                                        "LineOrd#1",
+                                        "3 Bellevue Drive, Pottstown, PA 19464"),
+                                insertRecord(
+                                        "Ord#2",
+                                        "LineOrd#2",
+                                        "4 Bellevue Drive, Pottstown, PB 19464"))
+                        .map(StreamRecord::getValue)
+                        .collect(Collectors.toList());
+        addRecordsToBuffer(stored);
+        buffer.clear();
+
+        List<RowData> insertThenDelete =
+                Stream.of(
+                                insertRecord(
+                                        "Ord#1",
+                                        "LineOrd#1",
+                                        "5 Bellevue Drive, Pottstown, PC 19464"),
+                                deleteRecord(
+                                        "Ord#1",
+                                        "LineOrd#1",
+                                        "5 Bellevue Drive, Pottstown, PC 19464"))
+                        .map(StreamRecord::getValue)
+                        .collect(Collectors.toList());
+        addRecordsToBuffer(insertThenDelete);
+        assertRecords(insertThenDelete, insertThenDelete.size());
+        assertJoinKeys(insertThenDelete);
+    }
+
+    private void testAccumulateRetractFoldWhenUpdateBeforePresentInternal() throws Exception {
+        List<RowData> records =
+                Stream.of(
+                                updateBeforeRecord(
+                                        "Ord#1",
+                                        "LineOrd#1",
+                                        "3 Bellevue Drive, Pottstown, PA 19464"),
+                                updateAfterRecord(
+                                        "Ord#1",
+                                        "LineOrd#1",
+                                        "5 Bellevue Drive, Pottstown, PC 19464"),
+                                deleteRecord(
+                                        "Ord#1",
+                                        "LineOrd#1",
+                                        "5 Bellevue Drive, Pottstown, PC 19464"))
+                        .map(StreamRecord::getValue)
+                        .collect(Collectors.toList());
+        addRecordsToBuffer(records);
+        List<RowData> expected =
+                Stream.of(
+                                updateBeforeRecord(
+                                        "Ord#1",
+                                        "LineOrd#1",
+                                        "3 Bellevue Drive, Pottstown, PA 19464"))
+                        .map(StreamRecord::getValue)
+                        .collect(Collectors.toList());
+        assertRecords(expected, records.size());
+        assertJoinKeys(expected);
     }
 
     private void assertRecords(List<RowData> expectedRecords, int inputSize) throws Exception {
