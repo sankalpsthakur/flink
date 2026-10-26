@@ -648,6 +648,22 @@ final class StreamingMiniBatchJoinOperatorTest extends StreamingJoinOperatorTest
         assertor.shouldEmit(
                 testHarness,
                 rowOfKind(
+                        RowKind.INSERT,
+                        "Ord#6",
+                        "LineOrd#5",
+                        "8 Bellevue Drive, Pottstown, PF 19464",
+                        "Ord#6",
+                        "LineOrd#5",
+                        "AIR"),
+                rowOfKind(
+                        RowKind.DELETE,
+                        "Ord#6",
+                        "LineOrd#5",
+                        "7 Bellevue Drive, Pottstown, PE 19464",
+                        "Ord#6",
+                        "LineOrd#5",
+                        "AIR"),
+                rowOfKind(
                         RowKind.UPDATE_AFTER,
                         "Ord#5",
                         "LineOrd#5",
@@ -1006,6 +1022,22 @@ final class StreamingMiniBatchJoinOperatorTest extends StreamingJoinOperatorTest
                         "RAILWAY"),
                 rowOfKind(
                         RowKind.INSERT,
+                        "Ord#3",
+                        "LineOrd#x3",
+                        "x5 Bellevue Drive, Pottstown, PCxx 19464",
+                        null,
+                        null,
+                        null),
+                rowOfKind(
+                        RowKind.DELETE,
+                        "Ord#3",
+                        "LineOrd#x3",
+                        "14y0 Bellevue Drive, Pottstown, PJyy 19464",
+                        null,
+                        null,
+                        null),
+                rowOfKind(
+                        RowKind.INSERT,
                         "Ord#4",
                         "LineOrd#4",
                         "6 Bellevue Drive, Pottstown, PD 19464",
@@ -1153,6 +1185,22 @@ final class StreamingMiniBatchJoinOperatorTest extends StreamingJoinOperatorTest
                         null),
                 rowOfKind(
                         RowKind.INSERT,
+                        "Ord#6",
+                        "LineOrd#5",
+                        "8 Bellevue Drive, Pottstown, PF 19464",
+                        null,
+                        null,
+                        null),
+                rowOfKind(
+                        RowKind.DELETE,
+                        "Ord#6",
+                        "LineOrd#5",
+                        "7 Bellevue Drive, Pottstown, PE 19464",
+                        null,
+                        null,
+                        null),
+                rowOfKind(
+                        RowKind.INSERT,
                         "Ord#5",
                         "LineOrd#5",
                         "7 Bellevue Drive, Pottstown, PE 19464",
@@ -1250,6 +1298,20 @@ final class StreamingMiniBatchJoinOperatorTest extends StreamingJoinOperatorTest
     void testLeftJoinJoinKeyContainsUniqueKeyWithoutRetract() throws Exception {
         // this case would create buffer of JoinKeyContainsUniqueKey
         testLeftJoinWithoutRetract();
+    }
+
+    @Tag("miniBatchSize=2")
+    @Test
+    void testLeftJoinJoinKeyContainsUniqueKeyUpdateAfterThenDelete() throws Exception {
+        // JoinKeyContainsUniqueKeyBundle must not fold +U/-D into nothing after storing the row
+        testLeftJoinUpdateAfterThenDeleteRetractsStoredRow();
+    }
+
+    @Tag("miniBatchSize=2")
+    @Test
+    void testLeftJoinHasUniqueKeyUpdateAfterThenDelete() throws Exception {
+        // InputSideHasUniqueKeyBundle has the same fold as JoinKeyContainsUniqueKeyBundle
+        testLeftJoinUpdateAfterThenDeleteRetractsStoredRow();
     }
 
     @Tag("miniBatchSize=2")
@@ -1724,6 +1786,60 @@ final class StreamingMiniBatchJoinOperatorTest extends StreamingJoinOperatorTest
                         "AIR"));
     }
 
+    /**
+     * Bundle 1 stores two left rows. Bundle 2 receives UPDATE_AFTER then DELETE for the first key.
+     * The previously stored row must be retracted; folding the pair into nothing would leave it in
+     * state and in the sink.
+     */
+    private void testLeftJoinUpdateAfterThenDeleteRetractsStoredRow() throws Exception {
+        testHarness.processElement1(
+                insertRecord("Ord#1", "LineOrd#1", "3 Bellevue Drive, Pottstown, PA 19464"));
+        testHarness.processElement1(
+                insertRecord("Ord#2", "LineOrd#2", "4 Bellevue Drive, Pottstown, PB 19464"));
+        assertor.shouldEmitAll(
+                testHarness,
+                rowOfKind(
+                        RowKind.INSERT,
+                        "Ord#1",
+                        "LineOrd#1",
+                        "3 Bellevue Drive, Pottstown, PA 19464",
+                        null,
+                        null,
+                        null),
+                rowOfKind(
+                        RowKind.INSERT,
+                        "Ord#2",
+                        "LineOrd#2",
+                        "4 Bellevue Drive, Pottstown, PB 19464",
+                        null,
+                        null,
+                        null));
+        testHarness.getOutput().clear();
+
+        testHarness.processElement1(
+                updateAfterRecord("Ord#1", "LineOrd#1", "5 Bellevue Drive, Pottstown, PC 19464"));
+        testHarness.processElement1(
+                deleteRecord("Ord#1", "LineOrd#1", "5 Bellevue Drive, Pottstown, PC 19464"));
+        assertor.shouldEmit(
+                testHarness,
+                rowOfKind(
+                        RowKind.INSERT,
+                        "Ord#1",
+                        "LineOrd#1",
+                        "5 Bellevue Drive, Pottstown, PC 19464",
+                        null,
+                        null,
+                        null),
+                rowOfKind(
+                        RowKind.DELETE,
+                        "Ord#1",
+                        "LineOrd#1",
+                        "5 Bellevue Drive, Pottstown, PC 19464",
+                        null,
+                        null,
+                        null));
+    }
+
     private void testLeftJoinWithoutRetract() throws Exception {
         // joinKey is LineOrd and uniqueKey is Ord
         List<StreamRecord<RowData>> records =
@@ -1948,7 +2064,42 @@ final class StreamingMiniBatchJoinOperatorTest extends StreamingJoinOperatorTest
         for (StreamRecord<RowData> row : records) {
             testHarness.processElement2(row);
         }
-        assertor.shouldEmitNothing(testHarness);
+        // +U then -U of the same unique key is kept so a stored row would still be retracted.
+        // Net effect here is a cancelling match on LineOrd#2.
+        assertor.shouldEmit(
+                testHarness,
+                rowOfKind(
+                        RowKind.DELETE,
+                        "Ord#2",
+                        "LineOrd#2",
+                        "4 Bellevue Drive, Pottstown, PB 19464",
+                        null,
+                        null,
+                        null),
+                rowOfKind(
+                        RowKind.INSERT,
+                        "Ord#2",
+                        "LineOrd#2",
+                        "4 Bellevue Drive, Pottstown, PB 19464",
+                        "Ord#5",
+                        "LineOrd#2",
+                        "TRUCK"),
+                rowOfKind(
+                        RowKind.UPDATE_BEFORE,
+                        "Ord#2",
+                        "LineOrd#2",
+                        "4 Bellevue Drive, Pottstown, PB 19464",
+                        "Ord#5",
+                        "LineOrd#2",
+                        "SHIP"),
+                rowOfKind(
+                        RowKind.INSERT,
+                        "Ord#2",
+                        "LineOrd#2",
+                        "4 Bellevue Drive, Pottstown, PB 19464",
+                        null,
+                        null,
+                        null));
     }
 
     @Override
