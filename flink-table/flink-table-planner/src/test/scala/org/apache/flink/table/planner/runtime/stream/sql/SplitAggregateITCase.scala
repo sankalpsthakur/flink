@@ -108,8 +108,8 @@ class SplitAggregateITCase(
     val data = new mutable.ListBuffer[Row]
     // g=1: sums that overflow TINYINT/SMALLINT/INT; mixed nulls on nullable_i
     data += Row.of(
-      JByte.MAX_VALUE,
-      JShort.MAX_VALUE,
+      JByte.valueOf(Byte.MaxValue),
+      JShort.valueOf(Short.MaxValue),
       Int.box(Int.MaxValue),
       Long.box(3L),
       new JBigDecimal("1.50"),
@@ -120,8 +120,8 @@ class SplitAggregateITCase(
       Int.box(1)
     )
     data += Row.of(
-      JByte.MAX_VALUE,
-      JShort.MAX_VALUE,
+      JByte.valueOf(Byte.MaxValue),
+      JShort.valueOf(Short.MaxValue),
       Int.box(Int.MaxValue),
       Long.box(3L),
       new JBigDecimal("2.50"),
@@ -181,7 +181,7 @@ class SplitAggregateITCase(
       Types.INT,
       Types.INT)
     val t = failingDataSource(data)(rowType)
-      .toTable(tEnv, 'tiny, 'small, 'i, 'big, 'dec, 'f, 'd, 'nullable_i, 'id, 'g)
+      .toTable(tEnv, 'tiny, 'small, 'i, 'big, 'dec_col, 'f, 'd, 'nullable_i, 'id, 'g)
     tEnv.createTemporaryView("Nums", t)
 
     val sink = new TestingRetractSink
@@ -194,7 +194,7 @@ class SplitAggregateITCase(
                   |  AVG(small),
                   |  AVG(i),
                   |  AVG(big),
-                  |  CAST(AVG(dec) AS DECIMAL(10, 2)),
+                  |  CAST(AVG(dec_col) AS DECIMAL(10, 2)),
                   |  CAST(AVG(f) AS FLOAT),
                   |  CAST(AVG(d) AS DOUBLE),
                   |  AVG(nullable_i)
