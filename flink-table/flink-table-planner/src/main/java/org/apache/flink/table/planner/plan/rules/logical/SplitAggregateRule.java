@@ -44,12 +44,15 @@ import org.apache.calcite.plan.RelRule;
 import org.apache.calcite.rel.RelCollations;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.AggregateCall;
+import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.SqlAggFunction;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.fun.SqlMinMaxAggFunction;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
+import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.util.ImmutableBitSet;
 import org.apache.calcite.util.ImmutableIntList;
 import org.apache.commons.lang3.ArrayUtils;
@@ -136,6 +139,12 @@ import static org.apache.flink.table.planner.utils.ShortcutUtils.unwrapTableConf
  * 3 | | \+-----+-----+-----+------------------+-----------------+------+ ---+---
  * </pre>
  *
+ * <p>When {@code AVG} is split into {@code SUM0} and {@code COUNT}, arguments of type {@code
+ * TINYINT}, {@code SMALLINT} or {@code INT} are projected as {@code BIGINT} first. Unsplit {@code
+ * AVG} already accumulates those types as {@code BIGINT}; without the cast, the partial {@code
+ * SUM0} keeps the narrow type and overflows. The final projection still casts back to the original
+ * {@code AVG} result type.
+ *
  * <p>NOTES: this rule is only used for Stream now.
  */
 @Value.Enclosing
@@ -209,9 +218,10 @@ public class SplitAggregateRule extends RelRule<SplitAggregateRule.SplitAggregat
                 tableConfig.get(
                         OptimizerConfigOptions.TABLE_OPTIMIZER_DISTINCT_AGG_SPLIT_BUCKET_NUM);
 
+        List<RexNode> extraProjects = new ArrayList<>(relBuilder.fields());
+        int originalFieldCount = extraProjects.size();
         if (hashFieldIndexes.length > 0) {
-            List<RexNode> projects = new ArrayList<>(relBuilder.fields());
-            int hashFieldsOffset = projects.size();
+            int hashFieldsOffset = extraProjects.size();
 
             IntStream.range(0, hashFieldIndexes.length)
                     .forEach(
@@ -226,10 +236,47 @@ public class SplitAggregateRule extends RelRule<SplitAggregateRule.SplitAggregat
                                                         FlinkSqlOperatorTable.HASH_CODE, hashField),
                                                 relBuilder.literal(buckets));
 
-                                projects.add(node);
+                                extraProjects.add(node);
                                 hashFieldsMap.put(hashFieldIdx, hashFieldsOffset + index);
                             });
-            relBuilder.project(projects);
+        }
+
+        // Unsplit AVG accumulates TINYINT/SMALLINT/INT in BIGINT. SUM0 keeps the argument
+        // type, so project those AVG arguments as BIGINT before partial SUM0. DISTINCT AVG
+        // still groups by hash(original arg) when that hash field exists.
+        Map<Integer, Integer> avgSumArgMap = new HashMap<>();
+        RelDataTypeFactory typeFactory = relBuilder.getTypeFactory();
+        RelDataType inputRowType = relBuilder.peek().getRowType();
+        for (AggregateCall aggCall : aggCalls) {
+            if (aggCall.getAggregation().getKind() != SqlKind.AVG
+                    || aggCall.getArgList().isEmpty()) {
+                continue;
+            }
+            int argIndex = aggCall.getArgList().get(0);
+            if (avgSumArgMap.containsKey(argIndex)) {
+                continue;
+            }
+            RelDataType argType = inputRowType.getFieldList().get(argIndex).getType();
+            if (!needsAvgSumWidening(argType)) {
+                continue;
+            }
+            RelDataType bigintType =
+                    typeFactory.createTypeWithNullability(
+                            typeFactory.createSqlType(SqlTypeName.BIGINT), argType.isNullable());
+            extraProjects.add(
+                    relBuilder.getRexBuilder().makeCast(bigintType, relBuilder.field(argIndex)));
+            int widenedIndex = extraProjects.size() - 1;
+            avgSumArgMap.put(argIndex, widenedIndex);
+            if (hashFieldsMap.containsKey(argIndex)) {
+                hashFieldsMap.put(widenedIndex, hashFieldsMap.get(argIndex));
+            }
+        }
+
+        if (extraProjects.size() > originalFieldCount) {
+            relBuilder.project(extraProjects);
+        }
+        if (!avgSumArgMap.isEmpty()) {
+            aggCalls = remapAvgSumArguments(aggCalls, avgSumArgMap);
         }
 
         // STEP 2: construct partial aggregates
@@ -503,6 +550,7 @@ public class SplitAggregateRule extends RelRule<SplitAggregateRule.SplitAggregat
             PARTIAL_FINAL_MAP = new HashMap<>();
 
     static {
+        // AVG -> SUM0 + COUNT. Narrow integer args are cast to BIGINT before SUM0; see onMatch.
         PARTIAL_FINAL_MAP.put(AVG, Tuple2.of(List.of(SUM0, COUNT), List.of(SUM0, SUM0)));
         PARTIAL_FINAL_MAP.put(COUNT, Tuple2.of(List.of(COUNT), List.of(SUM0)));
         PARTIAL_FINAL_MAP.put(MIN, Tuple2.of(List.of(MIN), List.of(MIN)));
@@ -562,6 +610,36 @@ public class SplitAggregateRule extends RelRule<SplitAggregateRule.SplitAggregat
             throw new TableException(
                     "Aggregation " + aggCall.getAggregation() + " is not supported to split!");
         }
+    }
+
+    private static boolean needsAvgSumWidening(RelDataType argType) {
+        switch (argType.getSqlTypeName()) {
+            case TINYINT:
+            case SMALLINT:
+            case INTEGER:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static List<AggregateCall> remapAvgSumArguments(
+            List<AggregateCall> aggCalls, Map<Integer, Integer> avgSumArgMap) {
+        List<AggregateCall> remapped = new ArrayList<>(aggCalls.size());
+        for (AggregateCall aggCall : aggCalls) {
+            if (aggCall.getAggregation().getKind() == SqlKind.AVG
+                    && !aggCall.getArgList().isEmpty()
+                    && avgSumArgMap.containsKey(aggCall.getArgList().get(0))) {
+                remapped.add(
+                        aggCall.copy(
+                                Collections.singletonList(
+                                        avgSumArgMap.get(aggCall.getArgList().get(0))),
+                                aggCall.filterArg));
+            } else {
+                remapped.add(aggCall);
+            }
+        }
+        return remapped;
     }
 
     /**

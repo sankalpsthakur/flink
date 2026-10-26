@@ -35,7 +35,7 @@ import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.{BeforeEach, TestTemplate}
 import org.junit.jupiter.api.extension.ExtendWith
 
-import java.lang.{Integer => JInt, Long => JLong}
+import java.lang.{Byte => JByte, Integer => JInt, Long => JLong, Short => JShort}
 import java.math.{BigDecimal => JBigDecimal}
 import java.util
 
@@ -83,6 +83,136 @@ class SplitAggregateITCase(
 
     val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
     tEnv.createTemporaryView("T", t)
+  }
+
+  @TestTemplate
+  def testAvgOnIntDoesNotOverflowWhenSplit(): Unit = {
+    val data = List((Int.MaxValue, 1), (Int.MaxValue, 2), (1, 3))
+    val t = failingDataSource(data).toTable(tEnv, 'x, 'k)
+    tEnv.createTemporaryView("MaxIntTable", t)
+
+    val sink = new TestingRetractSink
+    tEnv
+      .sqlQuery("SELECT COUNT(DISTINCT k), AVG(x) FROM MaxIntTable")
+      .toRetractStream[Row]
+      .addSink(sink)
+      .setParallelism(1)
+    env.execute()
+
+    // SUM overflows INT to -1 without the BIGINT widening, then (-1)/3 = 0.
+    assertThat(sink.getRetractResults).isEqualTo(List("3,1431655765"))
+  }
+
+  @TestTemplate
+  def testAvgOnNumericTypesWhenSplit(): Unit = {
+    val data = new mutable.ListBuffer[Row]
+    // g=1: sums that overflow TINYINT/SMALLINT/INT; mixed nulls on nullable_i
+    data += Row.of(
+      JByte.MAX_VALUE,
+      JShort.MAX_VALUE,
+      Int.box(Int.MaxValue),
+      Long.box(3L),
+      new JBigDecimal("1.50"),
+      Float.box(1.0f),
+      Double.box(1.0d),
+      Int.box(1),
+      Int.box(1),
+      Int.box(1)
+    )
+    data += Row.of(
+      JByte.MAX_VALUE,
+      JShort.MAX_VALUE,
+      Int.box(Int.MaxValue),
+      Long.box(3L),
+      new JBigDecimal("2.50"),
+      Float.box(3.0f),
+      Double.box(3.0d),
+      Int.box(3),
+      Int.box(2),
+      Int.box(1)
+    )
+    data += Row.of(
+      JByte.valueOf(1.toByte),
+      JShort.valueOf(1.toShort),
+      Int.box(1),
+      Long.box(3L),
+      new JBigDecimal("3.50"),
+      Float.box(5.0f),
+      Double.box(5.0d),
+      null,
+      Int.box(3),
+      Int.box(1)
+    )
+    // g=2: all-null AVG argument (empty set of non-null values)
+    data += Row.of(
+      JByte.valueOf(2.toByte),
+      JShort.valueOf(2.toShort),
+      Int.box(2),
+      Long.box(4L),
+      new JBigDecimal("4.00"),
+      Float.box(4.0f),
+      Double.box(4.0d),
+      null,
+      Int.box(4),
+      Int.box(2)
+    )
+    data += Row.of(
+      JByte.valueOf(4.toByte),
+      JShort.valueOf(4.toShort),
+      Int.box(4),
+      Long.box(6L),
+      new JBigDecimal("6.00"),
+      Float.box(6.0f),
+      Double.box(6.0d),
+      null,
+      Int.box(5),
+      Int.box(2)
+    )
+
+    val rowType = new RowTypeInfo(
+      Types.BYTE,
+      Types.SHORT,
+      Types.INT,
+      Types.LONG,
+      Types.DECIMAL,
+      Types.FLOAT,
+      Types.DOUBLE,
+      Types.INT,
+      Types.INT,
+      Types.INT)
+    val t = failingDataSource(data)(rowType)
+      .toTable(tEnv, 'tiny, 'small, 'i, 'big, 'dec, 'f, 'd, 'nullable_i, 'id, 'g)
+    tEnv.createTemporaryView("Nums", t)
+
+    val sink = new TestingRetractSink
+    tEnv
+      .sqlQuery("""
+                  |SELECT
+                  |  g,
+                  |  COUNT(DISTINCT id),
+                  |  AVG(tiny),
+                  |  AVG(small),
+                  |  AVG(i),
+                  |  AVG(big),
+                  |  CAST(AVG(dec) AS DECIMAL(10, 2)),
+                  |  CAST(AVG(f) AS FLOAT),
+                  |  CAST(AVG(d) AS DOUBLE),
+                  |  AVG(nullable_i)
+                  |FROM Nums
+                  |GROUP BY g
+                  |""".stripMargin)
+      .toRetractStream[Row]
+      .addSink(sink)
+    env.execute()
+
+    val expected = List(
+      // tiny 85, small 21845, int 1431655765; bigint 3; decimal/float/double 2.50/3.0/3.0;
+      // nullable_i = (1+3)/2 = 2
+      "1,3,85,21845,1431655765,3,2.50,3.0,3.0,2",
+      // tiny/small/int 3; bigint 5; decimal/float/double 5.00/5.0/5.0; nullable_i all-null
+      "2,2,3,3,3,5,5.00,5.0,5.0,null"
+    )
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 
   @TestTemplate
