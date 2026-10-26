@@ -193,7 +193,7 @@ public class SplitAggregateRule extends RelRule<SplitAggregateRule.SplitAggregat
     public void onMatch(RelOptRuleCall call) {
         TableConfig tableConfig = unwrapTableConfig(call);
         FlinkLogicalAggregate originalAggregate = call.rel(0);
-        List<AggregateCall> aggCalls = originalAggregate.getAggCallList();
+        final List<AggregateCall> originalAggCalls = originalAggregate.getAggCallList();
         FlinkRelNode input = call.rel(1);
         RelOptCluster cluster = originalAggregate.getCluster();
         FlinkRelBuilder relBuilder = (FlinkRelBuilder) call.builder();
@@ -202,12 +202,13 @@ public class SplitAggregateRule extends RelRule<SplitAggregateRule.SplitAggregat
 
         // STEP 1: add hash fields if necessary
         int[] hashFieldIndexes =
-                IntStream.range(0, aggCalls.size())
-                        .filter(i -> SplitAggregateRule.needAddHashFields(aggCalls.get(i)))
+                IntStream.range(0, originalAggCalls.size())
+                        .filter(i -> SplitAggregateRule.needAddHashFields(originalAggCalls.get(i)))
                         .flatMap(
                                 i ->
                                         Arrays.stream(
-                                                SplitAggregateRule.getArgIndexes(aggCalls.get(i))))
+                                                SplitAggregateRule.getArgIndexes(
+                                                        originalAggCalls.get(i))))
                         .distinct()
                         .filter(index -> !ArrayUtils.contains(aggGroupSet, index))
                         .sorted()
@@ -247,7 +248,7 @@ public class SplitAggregateRule extends RelRule<SplitAggregateRule.SplitAggregat
         Map<Integer, Integer> avgSumArgMap = new HashMap<>();
         RelDataTypeFactory typeFactory = relBuilder.getTypeFactory();
         RelDataType inputRowType = relBuilder.peek().getRowType();
-        for (AggregateCall aggCall : aggCalls) {
+        for (AggregateCall aggCall : originalAggCalls) {
             if (aggCall.getAggregation().getKind() != SqlKind.AVG
                     || aggCall.getArgList().isEmpty()) {
                 continue;
@@ -275,9 +276,10 @@ public class SplitAggregateRule extends RelRule<SplitAggregateRule.SplitAggregat
         if (extraProjects.size() > originalFieldCount) {
             relBuilder.project(extraProjects);
         }
-        if (!avgSumArgMap.isEmpty()) {
-            aggCalls = remapAvgSumArguments(aggCalls, avgSumArgMap);
-        }
+        List<AggregateCall> aggCalls =
+                avgSumArgMap.isEmpty()
+                        ? originalAggCalls
+                        : remapAvgSumArguments(originalAggCalls, avgSumArgMap);
 
         // STEP 2: construct partial aggregates
         Set<ImmutableBitSet> groupSetTreeSet = new TreeSet<>(ImmutableBitSet.ORDERING);
